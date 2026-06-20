@@ -62,6 +62,7 @@
 | `IconImageUrl` | url |
 | `UnrecordPlaytimeMinutes` | number |
 | `RecentPlayed` | number，`1`表示本次`GetRecentlyPlayedGames`包含该游戏，否则为`0` |
+| `RecentPlayedTimeMinutes` | number，本次`GetRecentlyPlayedGames`返回的`playtime_2weeks`分钟数；没有近期时长时为空 |
 | `TotalAchievement` | number |
 | `AchievedAchievement` | number |
 | `MonthSummaryRelation` | relation，关联到月度/年度总结表的月度条目 |
@@ -137,7 +138,7 @@
 - 每次同步会同时查询`GetOwnedGames`和`GetRecentlyPlayedGames`。
 - `GetOwnedGames`结果优先，`GetRecentlyPlayedGames`只补充前者没有的`AppID`。
 - 家庭共享游戏只有最近玩过时才可能通过`GetRecentlyPlayedGames`进入同步列表。
-- 每次同步会按本次`GetRecentlyPlayedGames`结果全库同步`RecentPlayed`，包含的游戏目标值为`1`，其他游戏目标值为`0`；如果当前值已经等于目标值会跳过写入，如果该接口失败则目标值全部按`0`处理。
+- 每次同步会按本次`GetRecentlyPlayedGames`结果全库同步`RecentPlayed`和`RecentPlayedTimeMinutes`；包含的游戏`RecentPlayed`目标值为`1`，近期时长取`playtime_2weeks`，其他游戏`RecentPlayed`目标值为`0`且近期时长为空；如果两个字段当前值都已经等于目标值会跳过写入，如果该接口失败则全部按未近期游玩处理。
 - Steam有、Notion没有：新增游戏总表记录。
 - 如果Notion游戏总表已有`HeaderImageUrl`，程序不会处理该字段。
 - 如果`HeaderImageUrl`为空，程序会请求`https://store.steampowered.com/api/appdetails?appids={appid}&cc=us`，读取`{appid}.data.header_image`写入该字段。
@@ -194,6 +195,16 @@ python notion_tools.py apply-template ^
 ```
 
 如果需要先清空页面内容再应用模板，可以显式追加`--erase-content`。这个选项会删除页面现有内容，使用前需要确认。
+
+从CSV同步游戏总表的`入库日期`字段：
+
+```bash
+python notion_tools.py sync-entry-dates ^
+  --data-source-id <游戏总表data_source_id> ^
+  --csv-file-path <csv文件路径>
+```
+
+CSV默认需要`游戏名`和`入库日期`两列。游戏名会先删除括号及括号中的内容，再与Notion游戏总表的`Name`字段按同样规则完全匹配。入库日期支持`YYYY 年 M 月 D 日`和`D Mon YYYY`两种格式，例如`2026 年 6 月 1 日`或`29 May 2026`。如果CSV列名不同，可以追加`--game-name-column`和`--entry-date-column`覆盖。
 
 工具默认从`NOTION_API_KEY`读取密钥，也可以用`--notion-api-key`覆盖；`NOTION_VERSION`默认值与主程序一致。
 

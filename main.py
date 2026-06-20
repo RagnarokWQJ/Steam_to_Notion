@@ -36,6 +36,7 @@ YEAR_SUMMARY_RELATION_PROPERTY_NAME = "YearSummaryRelation"
 PLAYED_YEAR_PROPERTY_NAME = "PlayedYear"
 PLAYED_MONTH_PROPERTY_NAME = "PlayedMonth"
 RECENT_PLAYED_PROPERTY_NAME = "RecentPlayed"
+RECENT_PLAYED_TIME_MINUTES_PROPERTY_NAME = "RecentPlayedTimeMinutes"
 BUY_YEAR_PROPERTY_NAME = "BuyYear"
 BUY_MONTH_PROPERTY_NAME = "BuyMonth"
 COMPLETE_YEAR_PROPERTY_NAME = "CompleteYear"
@@ -109,6 +110,7 @@ class SteamGame:
     name: str
     total_playtime_minutes: int
     recent_played: int
+    recent_played_time_minutes: Optional[int]
     store_url: str
     header_image_url: Optional[str]
     icon_image_url: Optional[str]
@@ -171,6 +173,7 @@ class NotionGamePage:
     icon_image_url: Optional[str]
     unrecord_playtime_minutes: Optional[int]
     recent_played: int
+    recent_played_time_minutes: Optional[int]
     month_summary_page_id_list: list[str]
     year_summary_page_id_list: list[str]
     played_year_name_list: list[str]
@@ -192,6 +195,14 @@ class SummaryCount:
     full_achievement_game_count: int = 0
     played_game_count: int = 0
     total_playtime_minutes: int = 0
+
+
+@dataclass
+class SummaryPageInfo:
+    """Notion summary page id and current numeric count values."""
+
+    page_id: str
+    summary_count: SummaryCount
 
 
 @dataclass
@@ -659,6 +670,7 @@ def merge_steam_game_list(
         existing_steam_game = app_id_to_steam_game.get(steam_game.app_id)
         if existing_steam_game is not None:
             existing_steam_game.recent_played = 1
+            existing_steam_game.recent_played_time_minutes = steam_game.recent_played_time_minutes
             continue
         merged_game_list.append(steam_game)
         app_id_to_steam_game[steam_game.app_id] = steam_game
@@ -675,6 +687,7 @@ def parse_steam_game(raw_game: dict[str, Any], recent_played: int) -> Optional[S
         return None
 
     total_playtime_minutes = safe_int(raw_game.get("playtime_forever")) or 0
+    recent_played_time_minutes = safe_int(raw_game.get("playtime_2weeks")) if recent_played else None
     raw_name = raw_game.get("name")
     name = str(raw_name).strip() if raw_name else f"Unknown Game {app_id}"
     raw_icon_hash = raw_game.get("img_icon_url")
@@ -685,6 +698,7 @@ def parse_steam_game(raw_game: dict[str, Any], recent_played: int) -> Optional[S
         name=name,
         total_playtime_minutes=total_playtime_minutes,
         recent_played=1 if recent_played else 0,
+        recent_played_time_minutes=recent_played_time_minutes,
         store_url=f"https://store.steampowered.com/app/{app_id}/",
         header_image_url=None,
         icon_image_url=build_icon_image_url(app_id, image_icon_hash),
@@ -1087,43 +1101,73 @@ def sync_recent_played_for_all_notion_games(
     notion_game_page_index: dict[int, NotionGamePage],
     steam_game_list: list[SteamGame],
 ) -> int:
-    """Synchronize RecentPlayed for all Notion games to the current Steam recent set."""
+    """Synchronize recent played fields for all Notion games to the current Steam recent set."""
 
-    recent_app_id_set = {
-        steam_game.app_id
+    recent_game_index = {
+        steam_game.app_id: steam_game
         for steam_game in steam_game_list
         if steam_game.recent_played == 1
     }
+    log_info(
+        "Starting recent played field sync. "
+        f"notion_game_count={len(notion_game_page_index)}, "
+        f"steam_recent_count={len(recent_game_index)}"
+    )
     updated_count = 0
     skipped_count = 0
     error_count = 0
 
     for notion_game_page in sorted(notion_game_page_index.values(), key=lambda item: item.name.lower()):
-        target_recent_played = 1 if notion_game_page.app_id in recent_app_id_set else 0
-        if notion_game_page.recent_played == target_recent_played:
+        recent_steam_game = recent_game_index.get(notion_game_page.app_id)
+        target_recent_played = 1 if recent_steam_game is not None else 0
+        target_recent_played_time_minutes = (
+            recent_steam_game.recent_played_time_minutes
+            if recent_steam_game is not None
+            else None
+        )
+
+        if (
+            notion_game_page.recent_played == target_recent_played
+            and notion_game_page.recent_played_time_minutes == target_recent_played_time_minutes
+        ):
             skipped_count += 1
             continue
 
         updated = update_notion_page(
             config,
             notion_game_page.page_id,
-            {RECENT_PLAYED_PROPERTY_NAME: {"number": target_recent_played}},
+            {
+                RECENT_PLAYED_PROPERTY_NAME: {"number": target_recent_played},
+                RECENT_PLAYED_TIME_MINUTES_PROPERTY_NAME: {"number": target_recent_played_time_minutes},
+            },
             (
                 "recent_played_sync, "
                 f"app_id={notion_game_page.app_id}, name={notion_game_page.name}, "
-                f"target_recent_played={target_recent_played}"
+                f"target_recent_played={target_recent_played}, "
+                f"target_recent_played_time_minutes={target_recent_played_time_minutes}"
             ),
         )
         if updated:
+            old_recent_played = notion_game_page.recent_played
+            old_recent_played_time_minutes = notion_game_page.recent_played_time_minutes
             notion_game_page.recent_played = target_recent_played
+            notion_game_page.recent_played_time_minutes = target_recent_played_time_minutes
             updated_count += 1
+            log_info(
+                "Updated recent played fields. "
+                f"app_id={notion_game_page.app_id}, name={notion_game_page.name}, "
+                f"old_recent_played={old_recent_played}, "
+                f"new_recent_played={target_recent_played}, "
+                f"old_recent_played_time_minutes={old_recent_played_time_minutes}, "
+                f"new_recent_played_time_minutes={target_recent_played_time_minutes}"
+            )
             continue
 
         error_count += 1
 
     log_info(
-        "Synced RecentPlayed for Notion game table. "
-        f"recent_count={len(recent_app_id_set)}, "
+        "Synced recent played fields for Notion game table. "
+        f"recent_count={len(recent_game_index)}, "
         f"updated_count={updated_count}, "
         f"skipped_count={skipped_count}, "
         f"error_count={error_count}"
@@ -1151,6 +1195,10 @@ def parse_notion_game_page(page: dict[str, Any]) -> Optional[NotionGamePage]:
         icon_image_url=get_notion_url(property_map, "IconImageUrl"),
         unrecord_playtime_minutes=get_optional_notion_int(property_map, "UnrecordPlaytimeMinutes"),
         recent_played=int(get_notion_number(property_map, RECENT_PLAYED_PROPERTY_NAME) or 0),
+        recent_played_time_minutes=get_optional_notion_int(
+            property_map,
+            RECENT_PLAYED_TIME_MINUTES_PROPERTY_NAME,
+        ),
         month_summary_page_id_list=get_notion_relation_id_list(property_map, MONTH_SUMMARY_RELATION_PROPERTY_NAME),
         year_summary_page_id_list=get_notion_relation_id_list(property_map, YEAR_SUMMARY_RELATION_PROPERTY_NAME),
         played_year_name_list=get_notion_multi_select_name_list(property_map, PLAYED_YEAR_PROPERTY_NAME),
@@ -1434,6 +1482,7 @@ def build_game_properties(
         "Name": build_title_property(steam_game.name),
         "AppID": {"number": steam_game.app_id},
         RECENT_PLAYED_PROPERTY_NAME: {"number": steam_game.recent_played},
+        RECENT_PLAYED_TIME_MINUTES_PROPERTY_NAME: {"number": steam_game.recent_played_time_minutes},
         "StoreUrl": {"url": steam_game.store_url},
     }
 
@@ -1675,16 +1724,22 @@ def create_notion_page(
     last_result = RequestResult(False, {}, None, "No create attempt was made.")
 
     for parent in parent_candidate_list:
-        body = {
-            "parent": parent,
-            "properties": property_map,
-        }
-        if cover_url:
-            body["cover"] = build_external_cover(cover_url)
-        if icon_url:
-            body["icon"] = build_external_file_payload(icon_url)
-
+        body = build_create_page_body(parent, property_map, cover_url, icon_url, use_default_template=True)
         last_result = notion_request(config, "POST", "https://api.notion.com/v1/pages", json_body=body)
+
+        if not last_result.ok and should_retry_create_without_default_template(last_result):
+            log_warning(
+                "Failed to create Notion page with default template. "
+                f"Retrying without template. context={context}, "
+                f"status={last_result.status_code}, reason={last_result.error_message}"
+            )
+            fallback_body = build_create_page_body(parent, property_map, cover_url, icon_url, use_default_template=False)
+            last_result = notion_request(
+                config,
+                "POST",
+                "https://api.notion.com/v1/pages",
+                json_body=fallback_body,
+            )
 
         if last_result.ok:
             page_id = last_result.data.get("id")
@@ -1702,6 +1757,39 @@ def create_notion_page(
         f"status={last_result.status_code}, reason={last_result.error_message}"
     )
     return None
+
+
+def build_create_page_body(
+    parent: dict[str, Any],
+    property_map: dict[str, Any],
+    cover_url: Optional[str],
+    icon_url: Optional[str],
+    use_default_template: bool,
+) -> dict[str, Any]:
+    """Build a Notion create page request body."""
+
+    body: dict[str, Any] = {
+        "parent": parent,
+        "properties": property_map,
+    }
+    if use_default_template:
+        body["template"] = {"type": "default"}
+    if cover_url:
+        body["cover"] = build_external_cover(cover_url)
+    if icon_url:
+        body["icon"] = build_external_file_payload(icon_url)
+
+    return body
+
+
+def should_retry_create_without_default_template(result: RequestResult) -> bool:
+    """Return true when a create-page failure is likely caused by default template handling."""
+
+    if result.status_code != 400:
+        return False
+
+    error_message = result.error_message.lower()
+    return "template" in error_message
 
 
 def update_notion_page(
@@ -1761,6 +1849,7 @@ def game_page_needs_update(
     metadata_changed = (
         steam_game.name != notion_game_page.name
         or steam_game.recent_played != notion_game_page.recent_played
+        or steam_game.recent_played_time_minutes != notion_game_page.recent_played_time_minutes
         or steam_game.store_url != notion_game_page.store_url
         or (
             steam_game.header_image_url is not None
@@ -2190,6 +2279,8 @@ def build_summary_properties(period_payload: PeriodPayload) -> dict[str, Any]:
 def sync_summary_count_fields(config: Config) -> None:
     """Recompute and update numeric fields in the monthly and yearly summary table."""
 
+    log_info("Starting summary count field sync.")
+
     if not config.notion_summary_data_source_id:
         log_error(
             "Missing NOTION_SUMMARY_DATA_SOURCE_ID. "
@@ -2221,7 +2312,7 @@ def sync_summary_count_fields(config: Config) -> None:
             "PlayedGameNum will be counted as zero for this run."
         )
 
-    summary_page_id_index: dict[tuple[str, str], str] = {}
+    summary_page_info_index: dict[tuple[str, str], SummaryPageInfo] = {}
     duplicate_summary_key_set: set[tuple[str, str]] = set()
     summary_page_list = query_all_notion_pages(config, config.notion_summary_data_source_id)
     if summary_page_list is None:
@@ -2230,15 +2321,35 @@ def sync_summary_count_fields(config: Config) -> None:
             "Existing periods with zero current count cannot be reset in this run."
         )
     else:
-        summary_page_id_index, duplicate_summary_key_set = build_summary_page_id_index(summary_page_list)
+        summary_page_info_index, duplicate_summary_key_set = build_summary_page_info_index(summary_page_list)
 
+    log_info(
+        "Loaded summary count source pages. "
+        f"game_page_count={len(game_page_list)}, "
+        f"period_page_count={len(period_page_list)}, "
+        f"summary_page_count={len(summary_page_list) if summary_page_list is not None else 0}, "
+        f"duplicate_summary_key_count={len(duplicate_summary_key_set)}"
+    )
     notion_game_page_list = parse_notion_game_page_list(game_page_list)
     period_stat_list = parse_period_stat_page_list(period_page_list)
     summary_count_map = build_summary_count_map(notion_game_page_list, period_stat_list)
-    target_key_set = set(summary_count_map) | set(summary_page_id_index)
+    target_key_set = set(summary_count_map) | set(summary_page_info_index)
+    log_info(
+        "Built summary count targets. "
+        f"target_period_count={len(target_key_set)}, "
+        f"computed_period_count={len(summary_count_map)}, "
+        f"existing_summary_period_count={len(summary_page_info_index)}"
+    )
+
+    updated_count = 0
+    unchanged_count = 0
+    skipped_duplicate_count = 0
+    skipped_invalid_count = 0
+    error_count = 0
 
     for summary_key in sorted(target_key_set, key=sort_summary_key):
         if summary_key in duplicate_summary_key_set:
+            skipped_duplicate_count += 1
             log_error(
                 "Skipped summary count update because duplicate summary rows exist. "
                 f"period={summary_key[1]}, type={summary_key[0]}."
@@ -2246,17 +2357,46 @@ def sync_summary_count_fields(config: Config) -> None:
             continue
 
         summary_count = summary_count_map.get(summary_key, SummaryCount())
-        summary_page_id = summary_page_id_index.get(summary_key)
+        summary_page_info = summary_page_info_index.get(summary_key)
+        summary_page_id = summary_page_info.page_id if summary_page_info is not None else None
         if summary_page_id is None:
             period_payload = build_summary_period_payload(summary_key[0], summary_key[1])
             if period_payload is None:
+                skipped_invalid_count += 1
                 continue
             summary_page_id = ensure_summary_page(config, period_payload)
-
-        if summary_page_id is None:
+        elif summary_page_info is not None and summary_count_equals(summary_page_info.summary_count, summary_count):
+            unchanged_count += 1
+            log_info(
+                "Summary count unchanged. "
+                f"period={summary_key[1]}, type={summary_key[0]}, "
+                f"{format_summary_count(summary_count)}"
+            )
             continue
 
-        update_summary_count_page(config, summary_page_id, summary_key[1], summary_key[0], summary_count)
+        if summary_page_id is None:
+            error_count += 1
+            continue
+
+        if update_summary_count_page(config, summary_page_id, summary_key[1], summary_key[0], summary_count):
+            updated_count += 1
+            log_info(
+                "Updated summary count page. "
+                f"period={summary_key[1]}, type={summary_key[0]}, "
+                f"{format_summary_count(summary_count)}"
+            )
+        else:
+            error_count += 1
+
+    log_info(
+        "Summary count field sync summary: "
+        f"target_period_count={len(target_key_set)}, "
+        f"updated_count={updated_count}, "
+        f"unchanged_count={unchanged_count}, "
+        f"skipped_duplicate_count={skipped_duplicate_count}, "
+        f"skipped_invalid_count={skipped_invalid_count}, "
+        f"error_count={error_count}"
+    )
 
 
 def parse_notion_game_page_list(page_list: list[dict[str, Any]]) -> list[NotionGamePage]:
@@ -2289,12 +2429,12 @@ def parse_period_stat_page_list(page_list: list[dict[str, Any]]) -> list[PeriodS
     return period_stat_list
 
 
-def build_summary_page_id_index(
+def build_summary_page_info_index(
     page_list: list[dict[str, Any]],
-) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]]]:
+) -> tuple[dict[tuple[str, str], SummaryPageInfo], set[tuple[str, str]]]:
     """Build a Period and Type keyed index from summary pages."""
 
-    summary_page_id_index: dict[tuple[str, str], str] = {}
+    summary_page_info_index: dict[tuple[str, str], SummaryPageInfo] = {}
     duplicate_key_set: set[tuple[str, str]] = set()
 
     for page in page_list:
@@ -2302,7 +2442,7 @@ def build_summary_page_id_index(
         if summary_key is None:
             continue
 
-        if summary_key in summary_page_id_index:
+        if summary_key in summary_page_info_index:
             duplicate_key_set.add(summary_key)
             log_error(
                 "Duplicate summary row found while building summary count index. "
@@ -2312,12 +2452,31 @@ def build_summary_page_id_index(
 
         page_id = page.get("id")
         if isinstance(page_id, str) and page_id:
-            summary_page_id_index[summary_key] = page_id
+            summary_page_info_index[summary_key] = SummaryPageInfo(
+                page_id=page_id,
+                summary_count=parse_summary_count_from_page(page),
+            )
 
     for duplicate_key in duplicate_key_set:
-        summary_page_id_index.pop(duplicate_key, None)
+        summary_page_info_index.pop(duplicate_key, None)
 
-    return summary_page_id_index, duplicate_key_set
+    return summary_page_info_index, duplicate_key_set
+
+
+def parse_summary_count_from_page(page: dict[str, Any]) -> SummaryCount:
+    """Parse current numeric summary count fields from one summary page."""
+
+    property_map = page.get("properties", {})
+    if not isinstance(property_map, dict):
+        return SummaryCount()
+
+    return SummaryCount(
+        new_game_count=int(get_notion_number(property_map, NEW_GAME_NUM_PROPERTY_NAME) or 0),
+        complete_game_count=int(get_notion_number(property_map, COMPLETE_GAME_NUM_PROPERTY_NAME) or 0),
+        full_achievement_game_count=int(get_notion_number(property_map, FULL_ACHIEVEMENT_GAME_NUM_PROPERTY_NAME) or 0),
+        played_game_count=int(get_notion_number(property_map, PLAYED_GAME_NUM_PROPERTY_NAME) or 0),
+        total_playtime_minutes=int(get_notion_number(property_map, TOTAL_PLAYTIME_MINUTES_PROPERTY_NAME) or 0),
+    )
 
 
 def parse_summary_page_key(page: dict[str, Any]) -> Optional[tuple[str, str]]:
@@ -2578,6 +2737,30 @@ def build_summary_count_properties(summary_count: SummaryCount) -> dict[str, Any
         PLAYED_GAME_NUM_PROPERTY_NAME: {"number": summary_count.played_game_count},
         TOTAL_PLAYTIME_MINUTES_PROPERTY_NAME: {"number": summary_count.total_playtime_minutes},
     }
+
+
+def format_summary_count(summary_count: SummaryCount) -> str:
+    """Format a SummaryCount for logs."""
+
+    return (
+        f"{NEW_GAME_NUM_PROPERTY_NAME}={summary_count.new_game_count}, "
+        f"{COMPLETE_GAME_NUM_PROPERTY_NAME}={summary_count.complete_game_count}, "
+        f"{FULL_ACHIEVEMENT_GAME_NUM_PROPERTY_NAME}={summary_count.full_achievement_game_count}, "
+        f"{PLAYED_GAME_NUM_PROPERTY_NAME}={summary_count.played_game_count}, "
+        f"{TOTAL_PLAYTIME_MINUTES_PROPERTY_NAME}={summary_count.total_playtime_minutes}"
+    )
+
+
+def summary_count_equals(left: SummaryCount, right: SummaryCount) -> bool:
+    """Return true when two SummaryCount values have identical numeric fields."""
+
+    return (
+        left.new_game_count == right.new_game_count
+        and left.complete_game_count == right.complete_game_count
+        and left.full_achievement_game_count == right.full_achievement_game_count
+        and left.played_game_count == right.played_game_count
+        and left.total_playtime_minutes == right.total_playtime_minutes
+    )
 
 
 def sort_summary_key(summary_key: tuple[str, str]) -> tuple[str, int]:
