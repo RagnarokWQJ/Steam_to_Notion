@@ -3,7 +3,7 @@ name: Steam to Notion Sync
 on:
   schedule:
     # GitHub cron uses UTC. 20:00 UTC is 04:00 next day in UTC+8 Beijing time.
-    - cron: "12 4 * * *"
+    - cron: "40 3 * * *"
       timezone: "Asia/Shanghai"
   workflow_dispatch:
 
