@@ -149,9 +149,11 @@
 - Notion页面icon使用同一个图标URL，画廊视图可以显示页面图标。
 - 程序会读取更新记录表的完整数据，选择`Index`数字最大的记录作为最新记录。
 - 如果最新记录的`DateTime`与当前北京时间在同一天，本次运行会被视为同日重复运行。
+- 程序运行日期只用于同日重复判断和更新记录；时长记录和月度/年度统计使用实际游玩日期，固定为北京时间运行日期减1天。
 - 如果更新记录表为空、查询失败、没有有效数字`Index`或最新记录没有有效`DateTime`，本次运行会被视为第一次初始化。
 - 第一次初始化会更新总时长、成就和`UnrecordPlaytimeMinutes`，但不会写入任何时长记录。
-- 如果本次日期还没有处理过时长：更新总时长和成就字段；新增游戏会写入一条时长记录，`DeltaMinutes = TotalPlaytimeMinutes`。
+- 如果本次日期还没有处理过时长：更新总时长和成就字段；新增游戏总时长大于0且不超过480分钟时，会写入一条时长记录，`DeltaMinutes = TotalPlaytimeMinutes`。
+- 新增游戏总时长为0时，只写入游戏总表，不写时长记录，也不更新周期统计和游玩年月分组。
 - 非第一次运行时，新游戏总时长超过480分钟会被视为历史未记录数据，只写入游戏总表和`UnrecordPlaytimeMinutes`，不写时长记录。
 - 新写入的时长记录会在`GameLogRelation`字段中关联到相同`AppID`的游戏总表页面。
 - 正常写入时长记录时，会同步年度和月度统计表，并在时长记录的`PeriodRelation`字段中关联对应的两条统计记录。
@@ -205,6 +207,19 @@ python notion_tools.py sync-entry-dates ^
 ```
 
 CSV默认需要`游戏名`和`入库日期`两列。游戏名会先删除括号及括号中的内容，再与Notion游戏总表的`Name`字段按同样规则完全匹配。入库日期支持`YYYY 年 M 月 D 日`和`D Mon YYYY`两种格式，例如`2026 年 6 月 1 日`或`29 May 2026`。如果CSV列名不同，可以追加`--game-name-column`和`--entry-date-column`覆盖。
+
+从游戏时长记录表全量重建派生统计数据：
+
+```bash
+python notion_tools.py rebuild-derived-stats ^
+  --game-data-source-id <游戏总表data_source_id> ^
+  --playtime-data-source-id <时长记录表data_source_id> ^
+  --period-data-source-id <月度年度统计表data_source_id> ^
+  --summary-data-source-id <月度年度总结表data_source_id> ^
+  --dry-run
+```
+
+确认`--dry-run`输出后，去掉`--dry-run`即可实际写入。重建会按时长记录表中的`Date`和`DeltaMinutes`重新生成月度/年度统计、修复时长记录的`GameLogRelation`和`PeriodRelation`、覆盖游戏总表的`PlayedYear`、`PlayedMonth`、`YearSummaryRelation`、`MonthSummaryRelation`，并重算月度年度总结数字。多余的月度年度统计页默认归档；如果只想报告不归档，可以追加`--keep-extra-period-stats`。
 
 工具默认从`NOTION_API_KEY`读取密钥，也可以用`--notion-api-key`覆盖；`NOTION_VERSION`默认值与主程序一致。
 

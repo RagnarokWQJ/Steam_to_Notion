@@ -317,6 +317,13 @@ def get_beijing_date_text(current_datetime: datetime) -> str:
     return current_datetime.astimezone(BEIJING_TIMEZONE).date().isoformat()
 
 
+def get_beijing_record_date_text(current_datetime: datetime) -> str:
+    """Return the playtime record date text for a Beijing datetime."""
+
+    record_date = current_datetime.astimezone(BEIJING_TIMEZONE).date() - timedelta(days=1)
+    return record_date.isoformat()
+
+
 def format_beijing_datetime_for_notion(current_datetime: datetime) -> str:
     """Format a datetime for a Notion date property with explicit UTC+8 offset."""
 
@@ -1892,7 +1899,7 @@ def sync_game_list(
     include_playtime: bool,
     create_playtime_records: bool,
     is_initial_sync: bool,
-    today_text: str,
+    record_date_text: str,
 ) -> SyncStats:
     """Synchronize Steam game snapshots into Notion."""
 
@@ -1906,10 +1913,10 @@ def sync_game_list(
             sync_new_game(
                 config,
                 steam_game,
-                today_text,
                 include_playtime,
                 create_playtime_records,
                 is_initial_sync,
+                record_date_text,
                 stats,
             )
             continue
@@ -1918,10 +1925,10 @@ def sync_game_list(
             config,
             steam_game,
             notion_game_page,
-            today_text,
             include_playtime,
             create_playtime_records,
             is_initial_sync,
+            record_date_text,
             stats,
         )
 
@@ -1941,10 +1948,10 @@ def sync_game_list(
 def sync_new_game(
     config: Config,
     steam_game: SteamGame,
-    today_text: str,
     include_playtime: bool,
     create_playtime_records: bool,
     is_initial_sync: bool,
+    record_date_text: str,
     stats: SyncStats,
 ) -> None:
     """Create a new game row and its first playtime record."""
@@ -1977,6 +1984,13 @@ def sync_new_game(
         log_info(f"Skipped initial playtime record because this run does not create playtime records. {context}")
         return
 
+    if steam_game.total_playtime_minutes <= 0:
+        log_info(
+            "Skipped initial playtime record because new game has no recorded playtime. "
+            f"{context}, total_playtime_minutes={steam_game.total_playtime_minutes}"
+        )
+        return
+
     if steam_game.total_playtime_minutes > NEW_GAME_UNRECORDED_PLAYTIME_THRESHOLD_MINUTES:
         log_info(
             "Skipped initial playtime record because new game playtime is treated as unrecorded history. "
@@ -1988,7 +2002,7 @@ def sync_new_game(
         config,
         steam_game,
         steam_game.total_playtime_minutes,
-        today_text,
+        record_date_text,
         created_game_page_id,
     )
     if created_record:
@@ -2024,10 +2038,10 @@ def sync_existing_game(
     config: Config,
     steam_game: SteamGame,
     notion_game_page: NotionGamePage,
-    today_text: str,
     include_playtime: bool,
     create_playtime_records: bool,
     is_initial_sync: bool,
+    record_date_text: str,
     stats: SyncStats,
 ) -> None:
     """Update an existing game row and write a playtime delta when needed."""
@@ -2063,7 +2077,7 @@ def sync_existing_game(
             config,
             steam_game,
             delta_minutes,
-            today_text,
+            record_date_text,
             notion_game_page.page_id,
             notion_game_page,
         )
@@ -2935,7 +2949,7 @@ def create_playtime_record(
     config: Config,
     steam_game: SteamGame,
     delta_minutes: int,
-    today_text: str,
+    record_date_text: str,
     game_page_id: Optional[str] = None,
     notion_game_page: Optional[NotionGamePage] = None,
 ) -> bool:
@@ -2946,7 +2960,7 @@ def create_playtime_record(
         config,
         steam_game,
         delta_minutes,
-        today_text,
+        record_date_text,
         game_page_id,
     )
     created_page_id = create_notion_page(
@@ -2955,7 +2969,7 @@ def create_playtime_record(
         build_playtime_properties(
             steam_game,
             delta_minutes,
-            today_text,
+            record_date_text,
             game_page_id,
             period_sync_result.period_page_id_list,
         ),
@@ -3007,7 +3021,8 @@ def run_sync() -> None:
         return
 
     current_datetime = get_beijing_now()
-    today_text = get_beijing_date_text(current_datetime)
+    sync_date_text = get_beijing_date_text(current_datetime)
+    record_date_text = get_beijing_record_date_text(current_datetime)
     sync_log_state = load_sync_log_state(config)
     last_update_datetime = sync_log_state.last_update_datetime
     last_update_date_text = (
@@ -3018,7 +3033,7 @@ def run_sync() -> None:
     is_initial_sync = not sync_log_state.has_known_last_update_datetime
     is_same_day_repeat = (
         sync_log_state.has_known_last_update_datetime
-        and last_update_date_text == today_text
+        and last_update_date_text == sync_date_text
     )
     include_playtime = not is_same_day_repeat
     create_playtime_records = include_playtime and not is_initial_sync
@@ -3027,18 +3042,21 @@ def run_sync() -> None:
     if is_initial_sync:
         log_info(
             "First initialization is enabled for this run. "
-            f"last_update_datetime={last_update_datetime}, current_date={today_text}. "
+            f"last_update_datetime={last_update_datetime}, sync_date={sync_date_text}, "
+            f"record_date={record_date_text}. "
             "Game totals and achievements will be synced, but no playtime records will be created."
         )
     elif include_playtime:
         log_info(
             "Playtime sync is enabled for this run. "
-            f"last_update_datetime={last_update_datetime}, current_date={today_text}"
+            f"last_update_datetime={last_update_datetime}, sync_date={sync_date_text}, "
+            f"record_date={record_date_text}"
         )
     else:
         log_info(
             "Playtime sync is skipped because current date was already processed. "
-            f"last_update_datetime={last_update_datetime}, current_date={today_text}"
+            f"last_update_datetime={last_update_datetime}, sync_date={sync_date_text}, "
+            f"record_date={record_date_text}"
         )
 
     steam_game_list = fetch_steam_game_list(config)
@@ -3073,7 +3091,7 @@ def run_sync() -> None:
         include_playtime,
         create_playtime_records,
         is_initial_sync,
-        today_text,
+        record_date_text,
     )
     sync_stats.error_count += stats.error_count
 
