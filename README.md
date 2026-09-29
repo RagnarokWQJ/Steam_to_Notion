@@ -244,18 +244,26 @@ python main.py
 
 GitHub会在公开仓库连续60天没有活动时自动停用定时工作流，fork后的定时工作流也默认停用，详见[GitHub说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)。
 
-`.github/workflows/keepalive.yml`提供独立的`Repository Keepalive`工作流，每月1日北京时间`04:17`在当前仓库的`actions-keepalive`分支添加一次空提交，也可以手动运行。保活不需要Steam或Notion Secrets，不受同步任务成功或失败影响。
+`.github/workflows/keepalive.yml`提供`Repository Keepalive`工作流，每周一北京时间`04:17`运行，也支持手动启动。它包含两个独立任务，互不依赖；其中一个失败时，另一个仍会执行。保活不需要Steam或Notion Secrets，不受数据同步任务成功或失败影响。
 
-- 首次运行自动创建独立的无父提交分支，之后只向该分支追加空提交；不修改默认分支和代码文件，也不强制推送。
-- 使用GitHub自动提供的`GITHUB_TOKEN`，仅保活任务请求`contents: write`，不需要额外配置个人访问令牌。仓库或组织策略需要允许该权限，并允许Actions创建和更新`actions-keepalive`分支；如果推送被拒绝，请检查对应的权限和分支规则。
-- 请保留`actions-keepalive`作为专用保活分支，不要将它设为默认分支或合并到`main`。
-- 这是预防停用的机制。如果工作流已经停用，它无法靠自己的定时器启动，需要先在Actions页面重新启用。
+1. **API保活**：每次运行都为`steam-to-notion.yml`和`keepalive.yml`调用GitHub启用接口。处于`active`或`disabled_inactivity`状态时调用；处于`disabled_manually`或`disabled_fork`状态时跳过，保留用户主动停用或尚未启用fork的选择。一个工作流查询或启用失败后，仍会尝试另一个，最终将任务标记为失败。
+2. **默认分支空提交**：读取默认分支最新提交的提交者时间，满30天（按24小时计算）才添加一次空提交，否则成功结束且不产生提交。正常代码更新、合并上游和保活空提交都参与该判断，手动运行也遵循同一规则。空提交不改动任何文件，不需要时间戳文件。
+
+没有其他代码更新时，正常约每35天产生一次空提交；某周漏跑或推送失败后，下一周会重新检查。检查本身和API调用不会改变用于判断的Git提交时间。
+
+- 使用GitHub自动提供的`GITHUB_TOKEN`，API任务请求`actions: write`，空提交任务请求`contents: write`，不需要额外配置个人访问令牌。仓库或组织策略需要允许这些权限；默认分支保护规则如果禁止Actions直接推送，空提交任务会失败，但API任务仍会尝试保活。
+- 只在默认分支运行保活。推送不使用强制覆盖；若运行期间默认分支有并发更新导致推送被拒绝，会明确失败，留待后续检查。
+- GitHub[启用接口](https://docs.github.com/en/rest/actions/workflows#enable-a-workflow)明确支持将工作流设为`active`，对已启用工作流重复调用以保活的做法可参考[gh-workflow-keepalive](https://github.com/liskin/gh-workflow-keepalive)。官方没有承诺每次调用都重置60天计时，因此同时保留空提交机制。
+- 两个任务仍依赖GitHub的定时调度。如果`Repository Keepalive`本身已经停用，需要先在Actions页面重新启用；本方案不能保证在长期调度中断或持续权限错误时自动恢复。
+- 旧版本创建的`actions-keepalive`分支不再使用，可以保留，无需合并到默认分支。
 
 ### Fork使用与后续更新
 
 1. Fork仓库，只复制默认分支即可；在自己的仓库配置上述Actions Secrets。
 2. 进入Actions页面启用工作流。确认`Steam to Notion Sync`和`Repository Keepalive`都已启用。
-3. 选择`Repository Keepalive`，点击`Run workflow`，选择默认分支并运行一次，确认成功创建或更新`actions-keepalive`分支。需要立即同步数据时，再手动运行`Steam to Notion Sync`。
+3. 选择`Repository Keepalive`，点击`Run workflow`，选择默认分支并运行一次，确认两个任务都成功。默认分支最新提交未满30天时，空提交任务会显示跳过，这是正常行为；API任务仍会执行。需要立即同步数据时，再手动运行`Steam to Notion Sync`。
 4. 上游发布新版本后，在自己仓库的Code页面点击`Sync fork` → `Update branch`，更新默认分支即可。更新包含本功能时，同样按第2、3步检查并启动保活。
 
-保活提交只存在于独立分支，多次保活不会让默认分支产生额外提交或文件差异，因此不会给后续同步上游代码增加合并冲突。Secrets保存在仓库设置中，`Sync fork`不会覆盖它们。为保持更新简单，请通过Secrets配置个人信息；自行修改默认分支中的Python文件、README或工作流，仍可能与未来上游修改产生冲突。
+上游和fork都可能在默认分支生成空提交，提交历史因此可能分叉，`Sync fork`更新时可能产生合并提交。空提交不改文件，本身不会引入内容冲突；如果只配置Secrets、不自行修改代码，仍可通过`Sync fork`更新。不要为了清除保活历史而强制覆盖分支。
+
+Secrets保存在仓库设置中，`Sync fork`不会覆盖它们。为保持更新简单，请通过Secrets配置个人信息；自行修改默认分支中的Python文件、README或工作流，仍可能与未来上游修改产生冲突。保活推送后，本地再次提交代码前可先运行`git pull --rebase origin main`（有未提交修改时先提交或暂存），以接收远程空提交。
