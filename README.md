@@ -234,8 +234,28 @@ python main.py
 
 ## GitHub Actions
 
-仓库根目录为`steam_sync`时，项目已经提供`.github/workflows/steam-to-notion.yml`。上传到GitHub后会在北京时间每天凌晨4点自动执行，并支持在Actions页面通过`workflow_dispatch`手动启动。
+仓库根目录为`steam_sync`时，项目已经提供`.github/workflows/steam-to-notion.yml`。上传到GitHub后会在北京时间每天凌晨`03:40`自动执行，并支持在Actions页面通过`workflow_dispatch`手动启动。
 
-GitHub cron使用UTC时间，所以北京时间`04:00`对应workflow中的`0 20 * * *`。
+工作流使用`cron: "40 3 * * *"`和`timezone: "Asia/Shanghai"`指定北京时间。
 
 正式部署前请确认`run_sync()`没有继续使用测试阶段写死的`Config(...)`覆盖环境变量，否则GitHub Actions传入的Secrets不会生效。
+
+### 定时保活
+
+GitHub会在公开仓库连续60天没有活动时自动停用定时工作流，fork后的定时工作流也默认停用，详见[GitHub说明](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows)。
+
+`.github/workflows/keepalive.yml`提供独立的`Repository Keepalive`工作流，每月1日北京时间`04:17`在当前仓库的`actions-keepalive`分支添加一次空提交，也可以手动运行。保活不需要Steam或Notion Secrets，不受同步任务成功或失败影响。
+
+- 首次运行自动创建独立的无父提交分支，之后只向该分支追加空提交；不修改默认分支和代码文件，也不强制推送。
+- 使用GitHub自动提供的`GITHUB_TOKEN`，仅保活任务请求`contents: write`，不需要额外配置个人访问令牌。仓库或组织策略需要允许该权限，并允许Actions创建和更新`actions-keepalive`分支；如果推送被拒绝，请检查对应的权限和分支规则。
+- 请保留`actions-keepalive`作为专用保活分支，不要将它设为默认分支或合并到`main`。
+- 这是预防停用的机制。如果工作流已经停用，它无法靠自己的定时器启动，需要先在Actions页面重新启用。
+
+### Fork使用与后续更新
+
+1. Fork仓库，只复制默认分支即可；在自己的仓库配置上述Actions Secrets。
+2. 进入Actions页面启用工作流。确认`Steam to Notion Sync`和`Repository Keepalive`都已启用。
+3. 选择`Repository Keepalive`，点击`Run workflow`，选择默认分支并运行一次，确认成功创建或更新`actions-keepalive`分支。需要立即同步数据时，再手动运行`Steam to Notion Sync`。
+4. 上游发布新版本后，在自己仓库的Code页面点击`Sync fork` → `Update branch`，更新默认分支即可。更新包含本功能时，同样按第2、3步检查并启动保活。
+
+保活提交只存在于独立分支，多次保活不会让默认分支产生额外提交或文件差异，因此不会给后续同步上游代码增加合并冲突。Secrets保存在仓库设置中，`Sync fork`不会覆盖它们。为保持更新简单，请通过Secrets配置个人信息；自行修改默认分支中的Python文件、README或工作流，仍可能与未来上游修改产生冲突。
